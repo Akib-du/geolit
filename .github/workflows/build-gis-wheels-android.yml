@@ -1,0 +1,219 @@
+name: Build GDAL + NumPy + Rasterio (Android arm64-v8a)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+    paths:
+      - ".github/workflows/build-gis-wheels-android.yml"
+      - "scripts/gdal-config"
+      - "triplets/arm64-android-gis.cmake"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-gis-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PY_TAG: cp313
+  GDAL_TRIPLET: arm64-android-gis
+  ANDROID_NDK_VERSION: "27.2.12479018"
+  ANDROID_API_LEVEL: "24"
+  RASTERIO_VERSION: "1.4.3"
+  NUMPY_VERSION: "2.2.6"
+
+jobs:
+  gdal:
+    name: Build GDAL and native dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-35" "ndk;${ANDROID_NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          test -f "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}/build/cmake/android.toolchain.cmake"
+
+      - name: Set up vcpkg
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg "$RUNNER_TEMP/vcpkg"
+          "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+
+      - name: Build GDAL, PROJ and native dependencies
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/vcpkg/vcpkg" install gdal \
+            --triplet "$GDAL_TRIPLET" \
+            --overlay-triplets="$GITHUB_WORKSPACE/triplets" \
+            --x-install-root="$GITHUB_WORKSPACE/gdal-prefix" \
+            --clean-after-build
+
+          PREFIX="$GITHUB_WORKSPACE/gdal-prefix/$GDAL_TRIPLET"
+          test -f "$PREFIX/include/gdal_version.h"
+          test -d "$PREFIX/lib"
+          test -d "$PREFIX/share/gdal"
+          test -d "$PREFIX/share/proj"
+          find "$PREFIX/lib" -maxdepth 1 -name 'libgdal.so*' -print -quit | grep -q .
+
+      - name: Verify GDAL native library architecture
+        shell: bash
+        run: |
+          PREFIX="$GITHUB_WORKSPACE/gdal-prefix/$GDAL_TRIPLET"
+          READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          GDAL_SO="$(find "$PREFIX/lib" -maxdepth 1 -name 'libgdal.so*' -type f | head -n1)"
+          "$READELF" -h "$GDAL_SO" | grep -E 'Machine:.*AArch64'
+
+      - name: Package GDAL prefix
+        shell: bash
+        run: |
+          tar -C gdal-prefix -czf gdal-prefix.tgz "$GDAL_TRIPLET"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gdal-prefix-android-arm64
+          path: gdal-prefix.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  wheels:
+    name: Build NumPy and Rasterio Android wheels
+    needs: gdal
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK for ELF verification
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "ndk;${ANDROID_NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: gdal-prefix-android-arm64
+
+      - name: Unpack GDAL prefix
+        shell: bash
+        run: |
+          mkdir -p "$HOME/gdal"
+          tar -xzf gdal-prefix.tgz -C "$HOME/gdal"
+          echo "GDAL_PREFIX=$HOME/gdal/$GDAL_TRIPLET" >> "$GITHUB_ENV"
+          test -f "$HOME/gdal/$GDAL_TRIPLET/include/gdal_version.h"
+
+      - name: Install wheel builder
+        run: python -m pip install --upgrade "cibuildwheel==3.3.1" build
+
+      - name: Download source distributions
+        shell: bash
+        run: |
+          mkdir -p sdists src wheelhouse
+          python -m pip download --no-deps --no-binary=:all: -d sdists \
+            "numpy==$NUMPY_VERSION" "rasterio==$RASTERIO_VERSION"
+          for archive in sdists/*.tar.gz; do
+            name="$(basename "$archive" .tar.gz)"
+            mkdir -p "src/$name"
+            tar -xzf "$archive" -C "src/$name" --strip-components=1
+          done
+          test -d "src/numpy-$NUMPY_VERSION"
+          test -d "src/rasterio-$RASTERIO_VERSION"
+
+      - name: Build NumPy wheel
+        shell: bash
+        env:
+          CIBW_PLATFORM: android
+          CIBW_ARCHS: arm64_v8a
+          CIBW_BUILD: cp313-android_arm64_v8a
+          CIBW_BUILD_FRONTEND: build
+          CIBW_BUILD_VERBOSITY: "1"
+          ANDROID_API_LEVEL: "24"
+        run: |
+          python -m cibuildwheel --output-dir wheelhouse "src/numpy-$NUMPY_VERSION"
+
+      - name: Build Rasterio wheel against the same GDAL
+        shell: bash
+        env:
+          CIBW_PLATFORM: android
+          CIBW_ARCHS: arm64_v8a
+          CIBW_BUILD: cp313-android_arm64_v8a
+          CIBW_BUILD_FRONTEND: build
+          CIBW_BUILD_VERBOSITY: "1"
+          ANDROID_API_LEVEL: "24"
+          CIBW_BEFORE_BUILD: "python -m pip install 'Cython>=3,<4' 'numpy==2.2.6' setuptools wheel"
+        run: |
+          export CIBW_ENVIRONMENT="GDAL_PREFIX=$GDAL_PREFIX GDAL_CONFIG=$GITHUB_WORKSPACE/scripts/gdal-config PKG_CONFIG_PATH=$GDAL_PREFIX/lib/pkgconfig"
+          "$GITHUB_WORKSPACE/scripts/gdal-config" --version
+          python -m cibuildwheel --output-dir wheelhouse "src/rasterio-$RASTERIO_VERSION"
+
+      - name: Assemble native runtime bundle
+        shell: bash
+        run: |
+          mkdir -p runtime/lib runtime/share
+          find "$GDAL_PREFIX/lib" -maxdepth 1 \( -name '*.so' -o -name '*.so.*' \) -exec cp -a -t runtime/lib {} +
+          cp -a "$GDAL_PREFIX/share/gdal" runtime/share/
+          cp -a "$GDAL_PREFIX/share/proj" runtime/share/
+          cp -a "$GDAL_PREFIX/include" runtime/
+          test -n "$(find runtime/lib -name '*.so*' -print -quit)"
+          tar -czf android-arm64-gis-runtime.tgz -C runtime .
+
+      - name: Verify wheel tags and native ELF architecture
+        shell: bash
+        run: |
+          shopt -s nullglob
+          wheels=(wheelhouse/*.whl)
+          test "${#wheels[@]}" -ge 2
+          for wheel in "${wheels[@]}"; do
+            echo "=== $wheel ==="
+            unzip -p "$wheel" '*/WHEEL' | grep -E 'Tag:.*android_arm64_v8a'
+          done
+
+          mkdir -p wheel-check
+          for wheel in "${wheels[@]}"; do
+            dir="wheel-check/$(basename "$wheel" .whl)"
+            mkdir -p "$dir"
+            unzip -q "$wheel" -d "$dir"
+          done
+
+          READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          so_count=0
+          while IFS= read -r so; do
+            "$READELF" -h "$so" | grep -q 'Machine:.*AArch64'
+            so_count=$((so_count + 1))
+          done < <(find wheel-check runtime/lib -type f -name '*.so*')
+          test "$so_count" -gt 0
+          echo "Verified $so_count ARM64 shared objects."
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: geolit-android-arm64-gis
+          path: |
+            wheelhouse/*.whl
+            android-arm64-gis-runtime.tgz
+          if-no-files-found: error
+          retention-days: 30

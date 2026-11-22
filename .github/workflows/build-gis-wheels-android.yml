@@ -168,7 +168,7 @@ jobs:
           CIBW_BEFORE_BUILD: "python -m pip install 'Cython>=3,<4' 'numpy==2.2.6' setuptools wheel"
         run: |
           chmod +x "$GITHUB_WORKSPACE/scripts/gdal-config"
-          export CIBW_ENVIRONMENT="GDAL_PREFIX=$GDAL_PREFIX GDAL_CONFIG=$GITHUB_WORKSPACE/scripts/gdal-config PKG_CONFIG_PATH=$GDAL_PREFIX/lib/pkgconfig"
+          export CIBW_ENVIRONMENT="GDAL_PREFIX=$GDAL_PREFIX GDAL_CONFIG=$GITHUB_WORKSPACE/scripts/gdal-config PKG_CONFIG_PATH=$GDAL_PREFIX/lib/pkgconfig LD_LIBRARY_PATH=$GDAL_PREFIX/lib"
           "$GITHUB_WORKSPACE/scripts/gdal-config" --version
           python -m cibuildwheel --output-dir wheelhouse "src/rasterio-$RASTERIO_VERSION"
 
@@ -180,6 +180,7 @@ jobs:
           cp -a "$GDAL_PREFIX/share/gdal" runtime/share/
           cp -a "$GDAL_PREFIX/share/proj" runtime/share/
           cp -a "$GDAL_PREFIX/include" runtime/
+          cp -a "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" runtime/lib/
           test -n "$(find runtime/lib -name '*.so*' -print -quit)"
           tar -czf android-arm64-gis-runtime.tgz -C runtime .
 

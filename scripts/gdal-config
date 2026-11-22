@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# gdal-config compatibility shim for cross-compiling Rasterio against vcpkg GDAL.
+set -euo pipefail
+
+: "${GDAL_PREFIX:?Set GDAL_PREFIX to the vcpkg installed/<triplet> directory}"
+P="$(cd "$GDAL_PREFIX" && pwd)"
+HEADER="$P/include/gdal_version.h"
+
+if [[ ! -f "$HEADER" ]]; then
+  echo "GDAL version header not found: $HEADER" >&2
+  exit 1
+fi
+
+VER="$(sed -nE 's/^#define GDAL_RELEASE_NAME "([^"]+)".*/\1/p' "$HEADER" | head -n1)"
+if [[ -z "$VER" ]]; then
+  echo "Could not read GDAL_RELEASE_NAME from $HEADER" >&2
+  exit 1
+fi
+
+for arg in "$@"; do
+  case "$arg" in
+    --version)  echo "$VER" ;;
+    --prefix)   echo "$P" ;;
+    --cflags)   echo "-I$P/include" ;;
+    --libs)     echo "-L$P/lib -lgdal" ;;
+    --datadir)  echo "$P/share/gdal" ;;
+    --dep-libs) echo "" ;;
+    --*)
+      echo "Unsupported gdal-config option: $arg" >&2
+      exit 2
+      ;;
+    *)
+      echo "Unexpected argument: $arg" >&2
+      exit 2
+      ;;
+  esac
+done

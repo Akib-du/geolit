@@ -167,6 +167,7 @@ jobs:
           ANDROID_API_LEVEL: "24"
           CIBW_BEFORE_BUILD: "python -m pip install 'Cython>=3,<4' 'numpy==2.2.6' setuptools wheel"
         run: |
+          chmod +x "$GITHUB_WORKSPACE/scripts/gdal-config"
           export CIBW_ENVIRONMENT="GDAL_PREFIX=$GDAL_PREFIX GDAL_CONFIG=$GITHUB_WORKSPACE/scripts/gdal-config PKG_CONFIG_PATH=$GDAL_PREFIX/lib/pkgconfig"
           "$GITHUB_WORKSPACE/scripts/gdal-config" --version
           python -m cibuildwheel --output-dir wheelhouse "src/rasterio-$RASTERIO_VERSION"
@@ -190,7 +191,7 @@ jobs:
           test "${#wheels[@]}" -ge 2
           for wheel in "${wheels[@]}"; do
             echo "=== $wheel ==="
-            unzip -p "$wheel" '*/WHEEL' | grep -E 'Tag:.*android_arm64_v8a'
+            unzip -p "$wheel" '*/WHEEL' | grep -E 'Tag:.*android_[0-9]+_arm64_v8a'
           done
 
           mkdir -p wheel-check
